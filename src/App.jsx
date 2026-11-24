@@ -1,231 +1,168 @@
-/**
- * App.jsx
- *
- * Top-level component. Manages state for rules, cart items, and results.
- * Wires together CSV upload → parse → engine → display.
- */
-
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import CsvUploader from './components/CsvUploader.jsx'
 import DataTable from './components/DataTable.jsx'
 import ErrorBanner from './components/ErrorBanner.jsx'
+import PdfCartUploader from './components/PdfCartUploader.jsx'
+import RuleComposer from './components/RuleComposer.jsx'
 import { parseRulesCSV, parseCartCSV } from './engine/csvParser.js'
-import { processCart, cartTotal } from './engine/discountEngine.js'
+import { evaluateCart } from './engine/discountEngine.js'
 
-// ── Column definitions ───────────────────────────────────────────
+const rupees = (amount) => `Rs.${Number(amount || 0).toLocaleString('en-IN')}`
 
 const RULES_COLUMNS = [
-  { key: 'ruleId',    label: 'Rule ID' },
-  { key: 'scope',     label: 'Scope',      render: (v) => v.charAt(0).toUpperCase() + v.slice(1) },
-  { key: 'appliesTo', label: 'Applies To' },
-  { key: 'type',      label: 'Type',       render: (v) => v.charAt(0).toUpperCase() + v.slice(1) },
-  {
-    key: 'value',
-    label: 'Value',
-    render: (v, row) => row.type === 'percentage' ? `${v}% off` : `Rs.${v} off`,
-  },
-  { key: 'stackable', label: 'Stackable',  render: (v) => (v ? 'Yes' : 'No') },
+  { key: 'ruleId', label: 'Rule ID' },
+  { key: 'scope', label: 'Scope', render: (value) => value[0].toUpperCase() + value.slice(1) },
+  { key: 'appliesTo', label: 'Applies to', render: (value, row) => row.scope === 'cart' ? 'Entire cart' : value },
+  { key: 'type', label: 'Offer', render: (value, row) => value === 'percentage' ? `${row.value}% off` : `${rupees(row.value)} off` },
+  { key: 'minCartValue', label: 'Condition', render: (value, row) => row.scope === 'cart' ? `Cart ≥ ${rupees(value)}` : '—' },
+  { key: 'stackable', label: 'Stacks', render: (value) => value ? 'Yes' : 'No' },
 ]
 
 const CART_COLUMNS = [
-  { key: 'itemId',    label: 'Item' },
-  { key: 'product',   label: 'Product' },
-  { key: 'brand',     label: 'Brand' },
-  { key: 'platform',  label: 'Platform' },
-  { key: 'basePrice', label: 'Base Price', render: (v) => `Rs.${v.toLocaleString('en-IN')}` },
+  { key: 'itemId', label: 'Item' },
+  { key: 'product', label: 'Product' },
+  { key: 'brand', label: 'Brand' },
+  { key: 'platform', label: 'Platform' },
+  { key: 'basePrice', label: 'Base price', render: (value) => rupees(value) },
 ]
 
 const RESULTS_COLUMNS = [
-  { key: 'itemId',    label: 'Item' },
-  { key: 'product',   label: 'Product' },
-  { key: 'basePrice', label: 'Base Price',  render: (v) => `Rs.${v.toLocaleString('en-IN')}` },
-  { key: 'finalPrice',label: 'Final Price',
-    render: (v, row) => (
-      <span style={{ fontWeight: 700, color: row.totalDiscount > 0 ? '#1e5c2c' : '#131A48' }}>
-        Rs.{v.toLocaleString('en-IN')}
-      </span>
-    ),
-  },
-  {
-    key: 'totalDiscount',
-    label: 'You Save',
-    render: (v) =>
-      v > 0 ? (
-        <span style={{ color: '#1e5c2c', fontWeight: 600 }}>Rs.{v.toLocaleString('en-IN')}</span>
-      ) : (
-        <span style={{ color: '#888' }}>—</span>
-      ),
-  },
-  {
-    key: 'reasoning',
-    label: 'Offer Applied',
-    render: (v) => (
-      <span style={{ color: v === 'No offers available' ? '#888' : '#131A48', fontStyle: v === 'No offers available' ? 'italic' : 'normal' }}>
-        {v}
-      </span>
-    ),
-  },
+  { key: 'itemId', label: 'Item' },
+  { key: 'product', label: 'Product' },
+  { key: 'basePrice', label: 'List', render: (value) => rupees(value) },
+  { key: 'finalPrice', label: 'Best price', render: (value, row) => <strong className={row.totalDiscount ? 'price-green' : ''}>{rupees(value)}</strong> },
+  { key: 'totalDiscount', label: 'Saved', render: (value) => value ? <span className="saving">−{rupees(value)}</span> : <span className="muted">—</span> },
+  { key: 'reasoning', label: 'Why this price', render: (value) => <span className={value === 'No offers available' ? 'muted' : ''}>{value}</span> },
 ]
 
-// ── Styles ───────────────────────────────────────────────────────
-
-const S = {
-  page:    { minHeight: '100vh', background: '#f7f7f9', fontFamily: 'Arial, sans-serif' },
-  header:  { background: '#131A48', padding: '0.85rem 2rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between' },
-  logoTxt: { fontFamily: 'Georgia, serif', fontSize: 17, fontWeight: 700, color: '#fff', letterSpacing: '-0.02em' },
-  logoSpan:{ color: '#FF5800' },
-  headerSub: { fontSize: 11, color: 'rgba(255,255,255,0.5)', textTransform: 'uppercase', letterSpacing: '0.07em' },
-  main:    { maxWidth: 960, margin: '0 auto', padding: '1.8rem 1.5rem' },
-  section: { background: '#fff', border: '1px solid #CECECE', borderRadius: 6, padding: '1.2rem 1.4rem', marginBottom: '1.2rem' },
-  sectionTitle: { fontFamily: 'Georgia, serif', fontWeight: 700, fontSize: 14, color: '#131A48', marginBottom: '0.7rem', paddingBottom: 6, borderBottom: '2px solid #FF5800', display: 'inline-block' },
-  grid2:   { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' },
-  btn:     {
-    background: '#FF5800', color: '#fff', border: 'none', borderRadius: 4,
-    padding: '0.65rem 2rem', fontSize: 13, fontWeight: 700, cursor: 'pointer',
-    letterSpacing: '0.04em', textTransform: 'uppercase',
-  },
-  btnDisabled: {
-    background: '#CECECE', color: '#fff', border: 'none', borderRadius: 4,
-    padding: '0.65rem 2rem', fontSize: 13, fontWeight: 700, cursor: 'not-allowed',
-    letterSpacing: '0.04em', textTransform: 'uppercase',
-  },
-  totalRow: {
-    display: 'flex', justifyContent: 'flex-end', alignItems: 'center',
-    gap: '1rem', marginTop: '0.75rem', paddingTop: '0.75rem',
-    borderTop: '2px solid #131A48',
-  },
-  totalLabel: { fontWeight: 700, fontSize: 14, color: '#131A48' },
-  totalValue: { fontWeight: 700, fontSize: 16, color: '#131A48' },
-  tag: (color, bg) => ({
-    display: 'inline-block', fontSize: 10, fontWeight: 700, padding: '1px 6px',
-    borderRadius: 20, background: bg, color, textTransform: 'uppercase', letterSpacing: '0.04em',
-  }),
+function RuleAudit({ item }) {
+  if (!item.alternatives.length) return null
+  return (
+    <details className="rule-audit">
+      <summary>{item.product}: why this offer won</summary>
+      <p><strong>{item.appliedRules.join(' + ')}</strong> gives the best eligible price.</p>
+      {item.alternatives.map((rule) => (
+        <p key={rule.ruleId} className="muted">{rule.ruleId} was not combined because it is non-stackable ({rupees(rule.saving)} possible saving).</p>
+      ))}
+    </details>
+  )
 }
 
-// ── Component ────────────────────────────────────────────────────
+// Pricing is derived from the current cart and rules. Keeping a quote out of
+// mutable state removes stale-result bugs when either input is replaced.
+function useCheckoutQuote(cartItems, rules, shouldShow) {
+  return useMemo(() => (
+    shouldShow && cartItems.length && rules.length
+      ? evaluateCart(cartItems, rules)
+      : null
+  ), [cartItems, rules, shouldShow])
+}
 
 export default function App() {
-  const [rules, setRules]           = useState([])
-  const [rulesErrors, setRulesErr]  = useState([])
+  const [rules, setRules] = useState([])
+  const [rulesErrors, setRulesErrors] = useState([])
   const [rulesFileName, setRulesFileName] = useState('')
-
-  const [cartItems, setCartItems]   = useState([])
+  const [cartItems, setCartItems] = useState([])
   const [cartErrors, setCartErrors] = useState([])
-  const [cartFileName, setCartFileName]   = useState('')
-
-  const [results, setResults]       = useState(null)
-
-  // ── Handlers ──
+  const [cartFileName, setCartFileName] = useState('')
+  const [shouldShowResults, setShouldShowResults] = useState(false)
+  const canCalculate = rules.length > 0 && cartItems.length > 0
+  const results = useCheckoutQuote(cartItems, rules, shouldShowResults)
 
   function handleRulesLoad(csvText, fileName) {
-    const { data, errors } = parseRulesCSV(csvText)
-    setRules(data)
-    setRulesErr(errors)
+    const parsed = parseRulesCSV(csvText)
+    setRules(parsed.data)
+    setRulesErrors(parsed.errors)
     setRulesFileName(fileName)
-    setResults(null) // clear stale results
+    setShouldShowResults(false)
   }
 
-  function handleCartLoad(csvText, fileName) {
-    const { data, errors } = parseCartCSV(csvText)
-    setCartItems(data)
-    setCartErrors(errors)
+  function handleCartCsvLoad(csvText, fileName) {
+    const parsed = parseCartCSV(csvText)
+    setCartItems(parsed.data)
+    setCartErrors(parsed.errors)
     setCartFileName(fileName)
-    setResults(null)
+    setShouldShowResults(false)
   }
 
-  function handleCalculate() {
-    const res = processCart(cartItems, rules)
-    setResults(res)
+  function handlePdfLoad(parsed, fileName) {
+    setCartErrors(parsed.errors)
+    if (!parsed.data.length) return
+    setCartItems(parsed.data)
+    setCartFileName(fileName)
+    setShouldShowResults(rules.length > 0)
   }
 
-  const canCalculate = rules.length > 0 && cartItems.length > 0
-
-  // ── Render ──
+  function addNaturalLanguageRule(candidate) {
+    const ruleId = `RULE-NL-${String(rules.filter((rule) => rule.ruleId.startsWith('RULE-NL-')).length + 1).padStart(2, '0')}`
+    const nextRules = [...rules, { ...candidate, ruleId }]
+    setRules(nextRules)
+    if (cartItems.length) setShouldShowResults(true)
+  }
 
   return (
-    <div style={S.page}>
-      {/* Header */}
-      <div style={S.header}>
-        <div style={S.logoTxt}>O<span style={S.logoSpan}>pp</span>tra</div>
-        <div style={S.headerSub}>Discount Engine</div>
-      </div>
+    <div className="app-shell">
+      <header className="topbar">
+        <a className="brand" href="#top" aria-label="Opptra Discount Engine">O<span>pp</span>tra</a>
+        <div className="topbar-note"><i /> Price confidence engine</div>
+      </header>
 
-      <div style={S.main}>
+      <main id="top" className="main-content">
+        <section className="hero">
+          <div>
+            <div className="eyebrow">Checkout pricing, explained</div>
+            <h1>The best eligible price.<br /><em>Nothing hidden.</em></h1>
+            <p>A customer-first discount engine that picks the highest saving, applies valid stacks, and gives every rupee a reason.</p>
+          </div>
+          <div className="hero-proof">
+            <span className="proof-icon">₹</span>
+            <div><strong>Best-price promise</strong><small>Every non-stackable offer is compared before checkout.</small></div>
+          </div>
+        </section>
 
-        {/* Upload row */}
-        <div style={S.grid2}>
-          {/* Rules upload */}
-          <div style={S.section}>
-            <div style={S.sectionTitle}>Discount Rules</div>
-            <CsvUploader
-              label="rules.csv"
-              description="Upload your discount rules CSV"
-              onLoad={handleRulesLoad}
-              hasData={rules.length > 0}
-              fileName={rulesFileName}
-            />
+        <section className="workspace-grid" aria-label="Pricing inputs">
+          <div className="panel">
+            <div className="panel-heading"><div><span className="step">01</span><h2>Load active offers</h2></div><span className="panel-caption">CSV source</span></div>
+            <CsvUploader label="rules.csv" description="Upload discount rules, including optional cart rules" onLoad={handleRulesLoad} hasData={rules.length > 0} fileName={rulesFileName} />
             <ErrorBanner errors={rulesErrors} />
-            {rules.length > 0 && (
-              <div style={{ marginTop: '0.75rem' }}>
-                <div style={{ fontSize: 11, color: '#888', marginBottom: 4 }}>
-                  {rules.length} rule{rules.length > 1 ? 's' : ''} loaded
-                </div>
-                <DataTable columns={RULES_COLUMNS} rows={rules} />
-              </div>
-            )}
+            {rules.length > 0 && <div className="data-preview"><span>{rules.length} active rule{rules.length === 1 ? '' : 's'}</span><DataTable columns={RULES_COLUMNS} rows={rules} /></div>}
           </div>
 
-          {/* Cart upload */}
-          <div style={S.section}>
-            <div style={S.sectionTitle}>Cart Items</div>
-            <CsvUploader
-              label="cart.csv"
-              description="Upload your cart CSV"
-              onLoad={handleCartLoad}
-              hasData={cartItems.length > 0}
-              fileName={cartFileName}
-            />
+          <div className="panel">
+            <div className="panel-heading"><div><span className="step">02</span><h2>Load the cart</h2></div><span className="panel-caption">CSV or PDF</span></div>
+            <div className="upload-options">
+              <CsvUploader label="Cart CSV" description="Upload cart.csv" onLoad={handleCartCsvLoad} hasData={cartItems.length > 0 && cartFileName.endsWith('.csv')} fileName={cartFileName} />
+              <PdfCartUploader onLoad={handlePdfLoad} onError={setCartErrors} hasData={cartItems.length > 0 && cartFileName.toLowerCase().endsWith('.pdf')} fileName={cartFileName} />
+            </div>
+            <p className="help-text">PDF import reads selectable-text tables. Valid rows are loaded; malformed rows are called out instead of guessed.</p>
             <ErrorBanner errors={cartErrors} />
-            {cartItems.length > 0 && (
-              <div style={{ marginTop: '0.75rem' }}>
-                <div style={{ fontSize: 11, color: '#888', marginBottom: 4 }}>
-                  {cartItems.length} item{cartItems.length > 1 ? 's' : ''} loaded
-                </div>
-                <DataTable columns={CART_COLUMNS} rows={cartItems} />
-              </div>
-            )}
+            {cartItems.length > 0 && <div className="data-preview"><span>{cartItems.length} cart item{cartItems.length === 1 ? '' : 's'}</span><DataTable columns={CART_COLUMNS} rows={cartItems} /></div>}
           </div>
+        </section>
+
+        <RuleComposer onConfirm={addNaturalLanguageRule} />
+
+        <div className="calculate-wrap">
+          <button className="primary-button calculate" disabled={!canCalculate} onClick={() => setShouldShowResults(true)}>Calculate best price <span>→</span></button>
+          {!canCalculate && <span>Load at least one offer and one cart item to calculate.</span>}
         </div>
 
-        {/* Calculate button */}
-        <div style={{ textAlign: 'center', marginBottom: '1.2rem' }}>
-          <button
-            style={canCalculate ? S.btn : S.btnDisabled}
-            onClick={handleCalculate}
-            disabled={!canCalculate}
-          >
-            Calculate Discounts
-          </button>
-          {!canCalculate && (
-            <div style={{ fontSize: 11, color: '#888', marginTop: 6 }}>
-              Upload both files to calculate
-            </div>
-          )}
-        </div>
-
-        {/* Results */}
         {results && (
-          <div style={S.section}>
-            <div style={S.sectionTitle}>Cart Summary</div>
-            <DataTable columns={RESULTS_COLUMNS} rows={results} />
-            <div style={S.totalRow}>
-              <span style={S.totalLabel}>Cart Total</span>
-              <span style={S.totalValue}>Rs.{cartTotal(results).toLocaleString('en-IN')}</span>
+          <section className="results-section" aria-live="polite">
+            <div className="results-heading"><div><div className="section-kicker">Customer checkout</div><h2>Your price, fully explained</h2></div><span className="calculated-badge">Calculated now</span></div>
+            <div className="metrics-row">
+              <div><span>Item subtotal</span><strong>{rupees(results.subtotal)}</strong></div>
+              <div><span>Total savings</span><strong className="saving">−{rupees(results.totalSavings)}</strong></div>
+              <div className="total-metric"><span>Final cart total</span><strong>{rupees(results.total)}</strong></div>
             </div>
-          </div>
+            {results.nextCartOffer && !results.cartOffer && <div className="threshold-nudge"><span>✦</span><div><strong>You’re {rupees(results.nextCartOffer.amountAway)} away from an extra cart offer.</strong><small>Add eligible items to reach {rupees(results.nextCartOffer.threshold)} after item discounts.</small></div></div>}
+            <DataTable columns={RESULTS_COLUMNS} rows={results.items} />
+            {results.cartOffer && <div className="cart-offer-row"><div><span className="offer-chip">Cart offer</span><strong>{results.cartOffer.label}</strong><small>{results.cartOffer.reasoning}</small></div><strong className="saving">−{rupees(results.cartOffer.saved)}</strong></div>}
+            <div className="final-total-row"><span>Final cart total</span><strong>{rupees(results.total)}</strong></div>
+            <div className="audit-list">{results.items.map((item) => <RuleAudit item={item} key={item.itemId} />)}</div>
+          </section>
         )}
-
-      </div>
+      </main>
     </div>
   )
 }
