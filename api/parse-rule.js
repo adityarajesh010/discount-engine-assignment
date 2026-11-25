@@ -1,38 +1,11 @@
 import { validateRule } from '../src/engine/ruleValidation.js'
-
-const ruleSchema = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['scope', 'appliesTo', 'type', 'value', 'stackable', 'minCartValue'],
-  properties: {
-    scope: { type: 'string', enum: ['brand', 'platform', 'cart'] },
-    appliesTo: { type: 'string', description: 'The exact brand or platform, otherwise an empty string for cart.' },
-    type: { type: 'string', enum: ['percentage', 'flat'] },
-    value: { type: 'number' },
-    stackable: { type: 'boolean' },
-    minCartValue: { type: ['number', 'null'] },
-  },
-}
-
-const schema = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['rule', 'clarification'],
-  properties: {
-    rule: { anyOf: [ruleSchema, { type: 'null' }] },
-    clarification: { type: ['string', 'null'] },
-  },
-}
-
-const instructions = [
-  'Extract one explicitly specified marketplace discount rule from the user text.',
-  'For missing or ambiguous amounts, targets, or thresholds, multiple offers, or unsupported conditions, return rule: null and a short clarification. Never invent missing values.',
-  'For a valid rule, set clarification to null. Brand and platform rules must name the exact target, without words like "brand" or "items", and use minCartValue: null.',
-  'Cart rules apply to the discounted cart subtotal. They require a percentage, an empty appliesTo, and a positive minimum, interpreted inclusively. Extract the stated threshold amount.',
-  'Set stackable to true only if combining offers is explicitly allowed. Treat negation as false.',
-].join(' ')
+import { clarificationFrom, ruleInstructions, ruleResponseSchema } from '../src/engine/ruleModelContract.js'
 
 export default async function handler(request, response) {
+  if (request.method === 'GET') {
+    response.setHeader('Cache-Control', 'no-store')
+    return response.status(200).json({ configured: Boolean(process.env.OPENAI_API_KEY) })
+  }
   if (request.method !== 'POST') return response.status(405).json({ error: 'Method not allowed' })
   const text = typeof request.body?.text === 'string' ? request.body.text.trim() : ''
   if (!text || text.length > 500) return response.status(400).json({ error: 'Provide a rule description of 1 to 500 characters.' })
@@ -51,7 +24,7 @@ export default async function handler(request, response) {
       body: JSON.stringify({
         model: process.env.OPENAI_MODEL || 'gpt-4.1-mini',
         store: false,
-        instructions,
+        instructions: ruleInstructions,
         max_output_tokens: 600,
         input: text,
         text: {
@@ -59,7 +32,7 @@ export default async function handler(request, response) {
             type: 'json_schema',
             name: 'discount_rule',
             strict: true,
-            schema,
+            schema: ruleResponseSchema,
           },
         },
       }),
@@ -76,8 +49,7 @@ export default async function handler(request, response) {
     }
     const parsed = JSON.parse(outputText)
     if (parsed?.rule === null) {
-      const clarification = typeof parsed.clarification === 'string' ? parsed.clarification.trim() : ''
-      return response.status(422).json({ error: clarification || 'Provide a discount amount and a clear target or cart minimum.' })
+      return response.status(422).json({ error: clarificationFrom(parsed) })
     }
     const validation = validateRule(parsed?.rule)
     if (!validation.ok) return response.status(422).json({ error: validation.errors.join('. ') })

@@ -5,6 +5,7 @@ import { requestRuleParse } from '../src/engine/ruleInterpreter.js'
 
 async function callRoute(text, method = 'POST') {
   const response = {
+    setHeader() {},
     status(status) { this.statusCode = status; return this },
     json(body) { return Response.json(body, { status: this.statusCode }) },
   }
@@ -52,25 +53,71 @@ test('server route handles raw Responses API output and keeps the credential ser
     assert.match((await result.json()).error, message)
   }
   const count = upstream.mock.callCount()
-  assert.equal((await callRoute(input, 'GET')).status, 405)
+  assert.deepEqual(await (await callRoute(input, 'GET')).json(), { configured: true })
+  delete process.env.OPENAI_API_KEY
+  assert.deepEqual(await (await callRoute(input, 'GET')).json(), { configured: false })
+  assert.equal((await callRoute(input, 'DELETE')).status, 405)
   assert.equal((await callRoute(' '.repeat(3))).status, 400)
   assert.equal((await callRoute('x'.repeat(501))).status, 400)
   assert.equal(upstream.mock.callCount(), count)
 })
 
-test('browser adapter preserves provider errors and falls back only when AI is absent', async (t) => {
-  const mocked = t.mock.method(globalThis, 'fetch', async () => Response.json({ rule }))
+test('hosted parser runs only when configured and preserves provider errors', async (t) => {
+  let configured = true
+  let result = () => Response.json({ rule })
+  let posts = 0
+  t.mock.method(globalThis, 'fetch', async (_url, options) => {
+    if (options.method !== 'POST') {
+      assert.equal(options.body, undefined)
+      return Response.json({ configured })
+    }
+    posts += 1
+    return result()
+  })
   const input = '20% off for Forge Works brand'
   assert.equal((await requestRuleParse(input)).source, 'llm')
 
-  mocked.mock.mockImplementation(async () => Response.json({ error: 'Offer target is ambiguous' }, { status: 422 }))
+  result = () => Response.json({ error: 'Offer target is ambiguous' }, { status: 422 })
   assert.deepEqual(await requestRuleParse(input), { ok: false, errors: ['Offer target is ambiguous'] })
 
-  mocked.mock.mockImplementation(async () => Response.json({ rule: null }))
+  result = () => Response.json({ rule: null })
   assert.equal((await requestRuleParse(input)).ok, false)
 
-  mocked.mock.mockImplementation(async () => Response.json({ code: 'AI_NOT_CONFIGURED' }, { status: 503 }))
+  configured = false
   const fallback = await requestRuleParse(input)
   assert.equal(fallback.source, 'local')
   assert.equal(fallback.candidate.appliesTo, 'Forge Works')
+  assert.equal(posts, 3)
+})
+
+test('on-device parsing validates structured output and sends no request to the hosted parser', async (t) => {
+  const network = t.mock.method(globalThis, 'fetch', () => { throw new Error('Unexpected network call') })
+  let output = { rule, clarification: null }
+  let closed = 0
+  globalThis.LanguageModel = {
+    availability: async () => 'available',
+    create: async ({ initialPrompts }) => {
+      assert.equal(initialPrompts[0].role, 'system')
+      return {
+        async prompt(text, { responseConstraint }) {
+          assert.match(text, /Forge Works/)
+          assert.deepEqual(responseConstraint.required, ['rule', 'clarification'])
+          return JSON.stringify(output)
+        },
+        destroy() { closed += 1 },
+      }
+    },
+  }
+  t.after(() => { delete globalThis.LanguageModel })
+
+  const input = 'Forge Works should take seventeen and a half per cent off'
+  const parsed = await requestRuleParse(input)
+  assert.equal(parsed.source, 'browser')
+  assert.equal(parsed.candidate.value, 17.5)
+  output = { rule: null, clarification: 'Which discount amount should apply?' }
+  assert.deepEqual(await requestRuleParse(input), { ok: false, errors: [output.clarification] })
+  output = { rule: { ...rule, value: 150 }, clarification: null }
+  assert.equal((await requestRuleParse(input)).ok, false)
+  assert.equal(closed, 3)
+  assert.equal(network.mock.callCount(), 0)
 })

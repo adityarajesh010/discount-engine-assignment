@@ -1,7 +1,9 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { requestRuleParse } from '../engine/ruleInterpreter.js'
+import { browserModelStatus, enableBrowserModel } from '../engine/browserRuleModel.js'
 
 const money = (value) => `Rs.${Number(value).toLocaleString('en-IN')}`
+const parserLabel = { browser: 'On-device AI', llm: 'Hosted AI', local: 'Local parser' }
 
 function Field({ label, value }) {
   return <div className="parsed-field"><span>{label}</span><strong>{value}</strong></div>
@@ -13,6 +15,30 @@ export default function RuleComposer({ onConfirm }) {
   const [errors, setErrors] = useState([])
   const [source, setSource] = useState('')
   const [loading, setLoading] = useState(false)
+  const [modelStatus, setModelStatus] = useState('unavailable')
+  const [download, setDownload] = useState(null)
+  const [downloadError, setDownloadError] = useState('')
+
+  useEffect(() => {
+    let active = true
+    browserModelStatus().then((status) => {
+      if (active) setModelStatus(status)
+    })
+    return () => { active = false }
+  }, [])
+
+  async function enableModel() {
+    setDownloadError('')
+    setDownload(0)
+    try {
+      await enableBrowserModel(setDownload)
+      setModelStatus('available')
+    } catch {
+      setDownloadError('Chrome could not finish preparing its model. You can still parse explicit rules.')
+    } finally {
+      setDownload(null)
+    }
+  }
 
   async function parse() {
     setErrors([])
@@ -47,7 +73,7 @@ export default function RuleComposer({ onConfirm }) {
           <h2 id="rule-composer-title">Describe an offer in plain English</h2>
           <p>Every rule is shown and validated before it can affect a price.</p>
         </div>
-        <span className="security-note">Key stays server-side</span>
+        {modelStatus === 'available' && <span className="security-note">On-device AI ready</span>}
       </div>
       <div className="composer-row">
         <textarea
@@ -65,12 +91,20 @@ export default function RuleComposer({ onConfirm }) {
         <button className="primary-button" onClick={parse} disabled={loading}>{loading ? 'Parsing…' : 'Parse rule'}</button>
       </div>
       <div className="examples">Try: “Rs.100 flat discount on all Flipkart items” · “10% off if cart value is more than Rs.5,000”</div>
+      {(modelStatus === 'downloadable' || modelStatus === 'downloading') && (
+        <div className="confirmation-actions model-actions">
+          <button type="button" className="secondary-button" onClick={enableModel} disabled={download !== null}>
+            {download === null ? 'Enable on-device AI' : `Preparing Chrome model… ${Math.round(download * 100)}%`}
+          </button>
+          <span className="help-text" role="status">{downloadError || 'Optional one-time Chrome model download.'}</span>
+        </div>
+      )}
       {errors.length > 0 && <div className="inline-error" role="alert">{errors.map((error) => <div key={error}>{error}</div>)}</div>}
       {candidate && (
         <div className="confirmation-card">
           <div className="confirmation-topline">
             <strong>Confirm this structured rule</strong>
-            <span className={`parser-source ${source}`}>{source === 'llm' ? 'AI parsed' : 'Local safe parser'}</span>
+            <span className={`parser-source ${source}`}>{parserLabel[source]}</span>
           </div>
           <div className="parsed-grid">
             <Field label="Scope" value={candidate.scope} />

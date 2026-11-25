@@ -71,6 +71,7 @@ textarea:focus { border-color: #f05d23; box-shadow: 0 0 0 3px rgba(240,93,35,.11
 .parsed-field span { color: #7b857e; font: .58rem 'DM Mono', monospace; text-transform: uppercase; }
 .parsed-field strong { margin-top: .22rem; color: #244432; font-size: .72rem; }
 .confirmation-actions { display: flex; gap: .55rem; }
+.model-actions { align-items: baseline; flex-wrap: wrap; margin-top: .65rem; }
 .calculate-wrap { min-height: 100px; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: .65rem; text-align: center; color: #828593; font-size: .72rem; }
 .calculate { min-width: 220px; }
 .calculate span { margin-left: .35rem; }

@@ -1,5 +1,6 @@
 import { validateRule } from './ruleValidation.js'
 import { amountPattern, currencyPattern, readAmount } from './moneyInput.js'
+import { parseWithBrowserModel } from './browserRuleModel.js'
 
 const percentage = /^(\d+(?:\.\d{1,2})?)\s*%\s+off\s+(.+)$/i
 const flat = new RegExp(`^(${currencyPattern}${amountPattern})\\s+(?:off|flat discount)\\s+(.+)$`, 'i')
@@ -40,6 +41,20 @@ function finalize(candidate) {
 }
 
 export async function requestRuleParse(text) {
+  const onDevice = await parseWithBrowserModel(text)
+  if (onDevice) return onDevice
+
+  // Check configuration without sending the entered rule. A static or offline
+  // installation keeps working even when this capability check fails.
+  let configured
+  try {
+    const status = await fetch('/api/parse-rule', { signal: AbortSignal.timeout(2500), cache: 'no-store' })
+    configured = status.ok && (await status.json())?.configured === true
+  } catch {
+    return parseRuleLocally(text)
+  }
+  if (!configured) return parseRuleLocally(text)
+
   try {
     const response = await fetch('/api/parse-rule', {
       method: 'POST',
