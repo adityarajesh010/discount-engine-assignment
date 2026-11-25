@@ -2,6 +2,8 @@
 
 A checkout prototype that compares item offers, stacks compatible savings, and explains what the customer pays. Cart offers apply to the item-discounted subtotal.
 
+[Open the live demo](https://discount-engine-assignment-puce.vercel.app/)
+
 ## Run locally
 
 With Node.js 22 or later, run `npm ci`, then `npm run dev`. Open the URL printed by Vite.
@@ -12,9 +14,7 @@ With Node.js 22 or later, run `npm ci`, then `npm run dev`. Open the URL printed
 2. Describe a rule such as `20% off for Natura Casa brand, stackable with other offers`. Review the structured rule, then select **Add & recalculate**. With the sample cart, the total becomes ₹5,026. An ambiguous description such as `Give a discount for big orders` asks for more detail.
 3. Upload [cart.pdf](sample-data/cart.pdf). It replaces the cart and immediately recalculates using the active rules. It contains the same six items as the sample CSV.
 
-## Live demo and deployment
-
-The production demo link will be added after deployment.
+## Deployment
 
 Import the GitHub repo into Vercel using the **Vite** preset, repository root, build command `npm run build`, and output directory `dist`. Vercel serves `api/parse-rule.js` as a function.
 
