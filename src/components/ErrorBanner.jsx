@@ -7,6 +7,7 @@ export default function ErrorBanner({ errors }) {
   if (!errors || errors.length === 0) return null
   return (
     <div
+      role="alert"
       style={{
         background: '#fce8e8',
         border: '1px solid #e57373',
@@ -14,6 +15,7 @@ export default function ErrorBanner({ errors }) {
         borderRadius: 4,
         padding: '0.6rem 0.9rem',
         marginTop: '0.5rem',
+          overflowWrap: 'anywhere',
       }}
     >
       <div style={{ fontWeight: 700, fontSize: 12, color: '#8a1a1a', marginBottom: 4 }}>

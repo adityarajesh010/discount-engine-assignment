@@ -52,15 +52,20 @@ export default function RuleComposer({ onConfirm }) {
       <div className="composer-row">
         <textarea
           value={text}
-          onChange={(event) => setText(event.target.value)}
+          onChange={(event) => {
+            setText(event.target.value)
+            setCandidate(null)
+            setErrors([])
+          }}
           placeholder="e.g. 20% off for Natura Casa brand, stackable with other offers"
           aria-label="Describe a discount rule"
           maxLength={500}
+          disabled={loading}
         />
         <button className="primary-button" onClick={parse} disabled={loading}>{loading ? 'Parsing…' : 'Parse rule'}</button>
       </div>
       <div className="examples">Try: “Rs.100 flat discount on all Flipkart items” · “10% off if cart value is more than Rs.5,000”</div>
-      {errors.length > 0 && <div className="inline-error">{errors.map((error) => <div key={error}>{error}</div>)}</div>}
+      {errors.length > 0 && <div className="inline-error" role="alert">{errors.map((error) => <div key={error}>{error}</div>)}</div>}
       {candidate && (
         <div className="confirmation-card">
           <div className="confirmation-topline">
@@ -72,7 +77,7 @@ export default function RuleComposer({ onConfirm }) {
             {candidate.scope !== 'cart' && <Field label="Applies to" value={candidate.appliesTo} />}
             <Field label="Discount" value={candidate.type === 'percentage' ? `${candidate.value}% off` : `${money(candidate.value)} off`} />
             <Field label="Stackable" value={candidate.stackable ? 'Yes' : 'No'} />
-            {candidate.scope === 'cart' && <Field label="Min. cart value" value={money(candidate.minCartValue)} />}
+            {candidate.scope === 'cart' && <Field label="Cart subtotal at least" value={money(candidate.minCartValue)} />}
           </div>
           <div className="confirmation-actions">
             <button className="primary-button" onClick={confirm}>Add & recalculate</button>

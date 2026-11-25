@@ -1,11 +1,11 @@
-import { useMemo, useState } from 'react'
-import CsvUploader from './components/CsvUploader.jsx'
+import { useMemo, useRef, useState } from 'react'
+import FileUploader from './components/FileUploader.jsx'
 import DataTable from './components/DataTable.jsx'
 import ErrorBanner from './components/ErrorBanner.jsx'
-import PdfCartUploader from './components/PdfCartUploader.jsx'
 import RuleComposer from './components/RuleComposer.jsx'
 import { parseRulesCSV, parseCartCSV } from './engine/csvParser.js'
 import { evaluateCart } from './engine/discountEngine.js'
+import { parseCartPDF } from './engine/pdfCartParser.js'
 
 const rupees = (amount) => `Rs.${Number(amount || 0).toLocaleString('en-IN')}`
 
@@ -36,11 +36,12 @@ const RESULTS_COLUMNS = [
 ]
 
 function RuleAudit({ item }) {
-  if (!item.alternatives.length) return null
+  if (!item.alternatives.length || !item.appliedOffers.length) return null
+  const winner = item.appliedOffers[0]
   return (
     <details className="rule-audit">
       <summary>{item.product}: why this offer won</summary>
-      <p><strong>{item.appliedRules.join(' + ')}</strong> gives the best eligible price.</p>
+      <p><strong>{winner.ruleId}</strong> saved {rupees(winner.saving)} before any stacked offers.</p>
       {item.alternatives.map((rule) => (
         <p key={rule.ruleId} className="muted">{rule.ruleId} was not combined because it is non-stackable ({rupees(rule.saving)} possible saving).</p>
       ))}
@@ -52,7 +53,7 @@ function RuleAudit({ item }) {
 // mutable state removes stale-result bugs when either input is replaced.
 function useCheckoutQuote(cartItems, rules, shouldShow) {
   return useMemo(() => (
-    shouldShow && cartItems.length && rules.length
+    shouldShow && cartItems.length
       ? evaluateCart(cartItems, rules)
       : null
   ), [cartItems, rules, shouldShow])
@@ -65,39 +66,59 @@ export default function App() {
   const [cartItems, setCartItems] = useState([])
   const [cartErrors, setCartErrors] = useState([])
   const [cartFileName, setCartFileName] = useState('')
+  const [cartLoading, setCartLoading] = useState(false)
   const [shouldShowResults, setShouldShowResults] = useState(false)
-  const canCalculate = rules.length > 0 && cartItems.length > 0
+  const rulesRead = useRef(0)
+  const cartRead = useRef(0)
+  const canCalculate = cartItems.length > 0
   const results = useCheckoutQuote(cartItems, rules, shouldShowResults)
 
-  function handleRulesLoad(csvText, fileName) {
-    const parsed = parseRulesCSV(csvText)
-    setRules(parsed.data)
-    setRulesErrors(parsed.errors)
-    setRulesFileName(fileName)
-    setShouldShowResults(false)
+  async function loadRules(file) {
+    const request = ++rulesRead.current
+    try {
+      const parsed = parseRulesCSV(await file.text())
+      if (request !== rulesRead.current) return
+      setRulesErrors(parsed.errors.length || parsed.data.length ? parsed.errors : ['No rules found in the CSV.'])
+      if (parsed.data.length) {
+        setRules(parsed.data)
+        setRulesFileName(file.name)
+      }
+    } catch {
+      if (request === rulesRead.current) setRulesErrors(['Could not read the rules CSV.'])
+    }
   }
 
-  function handleCartCsvLoad(csvText, fileName) {
-    const parsed = parseCartCSV(csvText)
-    setCartItems(parsed.data)
-    setCartErrors(parsed.errors)
-    setCartFileName(fileName)
-    setShouldShowResults(false)
-  }
-
-  function handlePdfLoad(parsed, fileName) {
-    setCartErrors(parsed.errors)
-    if (!parsed.data.length) return
-    setCartItems(parsed.data)
-    setCartFileName(fileName)
-    setShouldShowResults(rules.length > 0)
+  async function loadCart(file, format) {
+    const request = ++cartRead.current
+    setCartLoading(true)
+    setCartErrors([])
+    try {
+      const parsed = format === 'pdf' ? await parseCartPDF(file) : parseCartCSV(await file.text())
+      if (request !== cartRead.current) return
+      setCartErrors(parsed.errors.length || parsed.data.length ? parsed.errors : ['No cart items found.'])
+      if (!parsed.data.length) return
+      setCartItems(parsed.data)
+      setCartFileName(file.name)
+      setShouldShowResults(format === 'pdf')
+    } catch (error) {
+      if (request === cartRead.current) setCartErrors([`Could not read the ${format.toUpperCase()}: ${error.message}`])
+    } finally {
+      if (request === cartRead.current) setCartLoading(false)
+    }
   }
 
   function addNaturalLanguageRule(candidate) {
-    const ruleId = `RULE-NL-${String(rules.filter((rule) => rule.ruleId.startsWith('RULE-NL-')).length + 1).padStart(2, '0')}`
-    const nextRules = [...rules, { ...candidate, ruleId }]
-    setRules(nextRules)
-    if (cartItems.length) setShouldShowResults(true)
+    setRules((current) => {
+      const ids = new Set(current.map((rule) => rule.ruleId))
+      let index = 1
+      let ruleId = 'RULE-NL-01'
+      while (ids.has(ruleId)) {
+        index += 1
+        ruleId = `RULE-NL-${String(index).padStart(2, '0')}`
+      }
+      return [...current, { ...candidate, ruleId }]
+    })
+    setShouldShowResults(true)
   }
 
   return (
@@ -123,7 +144,7 @@ export default function App() {
         <section className="workspace-grid" aria-label="Pricing inputs">
           <div className="panel">
             <div className="panel-heading"><div><span className="step">01</span><h2>Load active offers</h2></div><span className="panel-caption">CSV source</span></div>
-            <CsvUploader label="rules.csv" description="Upload discount rules, including optional cart rules" onLoad={handleRulesLoad} hasData={rules.length > 0} fileName={rulesFileName} />
+            <FileUploader label="Rules CSV" accept=".csv" description="Brand, platform, and cart rules" onSelect={loadRules} fileName={rulesFileName} />
             <ErrorBanner errors={rulesErrors} />
             {rules.length > 0 && <div className="data-preview"><span>{rules.length} active rule{rules.length === 1 ? '' : 's'}</span><DataTable columns={RULES_COLUMNS} rows={rules} /></div>}
           </div>
@@ -131,10 +152,11 @@ export default function App() {
           <div className="panel">
             <div className="panel-heading"><div><span className="step">02</span><h2>Load the cart</h2></div><span className="panel-caption">CSV or PDF</span></div>
             <div className="upload-options">
-              <CsvUploader label="Cart CSV" description="Upload cart.csv" onLoad={handleCartCsvLoad} hasData={cartItems.length > 0 && cartFileName.endsWith('.csv')} fileName={cartFileName} />
-              <PdfCartUploader onLoad={handlePdfLoad} onError={setCartErrors} hasData={cartItems.length > 0 && cartFileName.toLowerCase().endsWith('.pdf')} fileName={cartFileName} />
+              <FileUploader label="Cart CSV" accept=".csv" description="Upload cart.csv" onSelect={(file) => loadCart(file, 'csv')} fileName={/\.csv$/i.test(cartFileName) ? cartFileName : ''} />
+              <FileUploader label="Cart PDF" accept="application/pdf,.pdf" description="Product, Brand, Platform, Base Price" onSelect={(file) => loadCart(file, 'pdf')} fileName={/\.pdf$/i.test(cartFileName) ? cartFileName : ''} />
             </div>
-            <p className="help-text">PDF import reads selectable-text tables. Valid rows are loaded; malformed rows are called out instead of guessed.</p>
+            <p className="help-text">Use a PDF with selectable text. The importer lists any rows it skipped.</p>
+            {cartLoading && <p className="help-text" role="status">Reading cart…</p>}
             <ErrorBanner errors={cartErrors} />
             {cartItems.length > 0 && <div className="data-preview"><span>{cartItems.length} cart item{cartItems.length === 1 ? '' : 's'}</span><DataTable columns={CART_COLUMNS} rows={cartItems} /></div>}
           </div>
@@ -144,7 +166,7 @@ export default function App() {
 
         <div className="calculate-wrap">
           <button className="primary-button calculate" disabled={!canCalculate} onClick={() => setShouldShowResults(true)}>Calculate best price <span>→</span></button>
-          {!canCalculate && <span>Load at least one offer and one cart item to calculate.</span>}
+          {!canCalculate && <span>Load a cart to calculate its total.</span>}
         </div>
 
         {results && (

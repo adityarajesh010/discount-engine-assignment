@@ -1,40 +1,37 @@
 import { validateRule } from './ruleValidation.js'
+import { amountPattern, currencyPattern, readAmount } from './moneyInput.js'
 
-const trim = (value) => String(value || '').replace(/\s+/g, ' ').trim()
+const percentage = /^(\d+(?:\.\d{1,2})?)\s*%\s+off\s+(.+)$/i
+const flat = new RegExp(`^(${currencyPattern}${amountPattern})\\s+(?:off|flat discount)\\s+(.+)$`, 'i')
+const cart = new RegExp(`^(?:if|when) (?:the )?(?:cart|order)(?: (?:value|total|subtotal))? (?:is )?(?:more than|greater than|above|over|at least|>=|≥) ((?:${currencyPattern})?${amountPattern})$`, 'i')
+const brand = /^(?:on|for) (?:all )?(.+?) brand$/i
+const platform = /^(?:on|for) (?:all )?(.+?) (?:platform|items|products)$/i
+const stacking = /(?:,\s*|\s+)((?:(?:non[- ]|not\s+)?)stackable(?: with other offers)?)$/i
+const fallbackError = 'Use one explicit offer with an amount and a named brand, platform, or cart minimum. For example: “15% off for Acme brand”.'
 
-function extractValue(text) {
-  const percent = text.match(/(\d+(?:\.\d+)?)\s*%/i)
-  if (percent) return { type: 'percentage', value: Number(percent[1]) }
-  const flat = text.match(/(?:₹|rs\.?|inr)\s*(\d[\d,]*(?:\.\d+)?)/i)
-  return flat ? { type: 'flat', value: Number(flat[1].replace(/,/g, '')) } : null
-}
-
-/**
- * A deliberately narrow local safety net. The hosted API parser handles open
- * language; this only accepts the transparent, well-formed phrasing shown in
- * the brief so that a missing API key never silently invents a promotion.
- */
+// Offline mode accepts a small grammar with arbitrary targets and amounts.
 export function parseRuleLocally(text) {
-  const normalized = trim(text)
-  const value = extractValue(normalized)
-  if (!value) return { ok: false, errors: ['I need a discount value, such as "20%" or "Rs.100".'] }
+  const normalized = text.trim().replace(/\s+/g, ' ').replace(/\.$/, '')
+  const stackPhrase = normalized.match(stacking)
+  const stackable = /^stackable/i.test(stackPhrase?.[1] ?? '')
+  const statement = stackPhrase ? normalized.slice(0, stackPhrase.index).trimEnd() : normalized
+  const percentMatch = statement.match(percentage)
+  const discount = percentMatch ?? statement.match(flat)
+  if (!discount) return { ok: false, errors: [fallbackError] }
 
-  const stackable = /\bstack(?:able|\s+with)\b/i.test(normalized)
-  if (/\b(cart|order)\b/i.test(normalized)) {
-    const threshold = normalized.match(/(?:more than|above|over|at least|minimum(?:\s+cart(?:\s+value)?)?|greater than|>=)\s*(?:rs\.?|₹|inr)?\s*(\d[\d,]*)/i)
-      || normalized.match(/(?:rs\.?|₹|inr)\s*(\d[\d,]*).{0,30}(?:cart|order)/i)
-    if (!threshold) return { ok: false, errors: ['I need a cart threshold, for example "if cart value is more than Rs.5,000".'] }
-    return finalize({ scope: 'cart', type: value.type, value: value.value, stackable, minCartValue: threshold[1].replace(/,/g, '') })
+  const [, amount, target] = discount
+  const rule = { type: percentMatch ? 'percentage' : 'flat', value: readAmount(amount), stackable }
+  const threshold = target.match(cart)
+  if (threshold) {
+    return finalize({ ...rule, scope: 'cart', minCartValue: readAmount(threshold[1]) })
   }
 
-  const brand = normalized.match(/(?:for|on)\s+(.+?)\s+brand\b/i)
-  if (brand) return finalize({ scope: 'brand', appliesTo: trim(brand[1]), type: value.type, value: value.value, stackable })
-
-  const platform = normalized.match(/(?:on|for)\s+(?:all\s+)?(.+?)\s+(?:items|products)\b/i)
-    || normalized.match(/(?:on|for)\s+(Amazon(?:\s+India)?|Flipkart|Noon)\b/i)
-  if (platform) return finalize({ scope: 'platform', appliesTo: trim(platform[1]), type: value.type, value: value.value, stackable })
-
-  return { ok: false, errors: ['Please say who the rule applies to: a brand, a platform, or the cart.'] }
+  const brandMatch = target.match(brand)
+  const appliesTo = (brandMatch ?? target.match(platform))?.[1]
+  if (!appliesTo || /[%£$₹,;]|\b(?:and|or|if|when|except|over|under|stackable)\b/i.test(appliesTo)) {
+    return { ok: false, errors: [fallbackError] }
+  }
+  return finalize({ ...rule, scope: brandMatch ? 'brand' : 'platform', appliesTo })
 }
 
 function finalize(candidate) {
@@ -46,17 +43,17 @@ export async function requestRuleParse(text) {
   try {
     const response = await fetch('/api/parse-rule', {
       method: 'POST',
+      signal: AbortSignal.timeout(15_000),
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text }),
     })
-    if (response.ok) {
-      const payload = await response.json()
-      const validation = validateRule(payload.rule || payload)
-      if (validation.ok) return { ok: true, candidate: validation.rule, source: 'llm' }
-      return { ok: false, errors: validation.errors }
-    }
+    if (response.status === 404 || response.status === 405) return parseRuleLocally(text)
+    const payload = await response.json()
+    if (response.status === 503 && payload?.code === 'AI_NOT_CONFIGURED') return parseRuleLocally(text)
+    if (!response.ok && typeof payload?.error === 'string') return { ok: false, errors: [payload.error] }
+    const validation = validateRule(payload?.rule)
+    return validation.ok ? { ok: true, candidate: validation.rule, source: 'llm' } : validation
   } catch {
-    // A static build or local Vite server intentionally has no API route.
+    return { ok: false, errors: ['Could not reach the rule parser. Try again.'] }
   }
-  return parseRuleLocally(text)
 }

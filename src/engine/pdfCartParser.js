@@ -1,113 +1,123 @@
-const compact = (value) => String(value || '').replace(/\s+/g, ' ').trim()
-const priceFrom = (value) => Number(String(value).replace(/[^0-9.]/g, ''))
+import { readAmount } from './moneyInput.js'
 
-let pdfRuntime
+const headers = ['product', 'brand', 'platform', 'base price']
+const cellGap = / {2,}|\t+/
+const compact = (value) => value.replace(/\s+/g, ' ').trim()
+const maxFileSize = 10 * 1024 * 1024
+const maxPages = 50
+
+let runtime
 
 async function loadPdfRuntime() {
-  if (!pdfRuntime) {
-    pdfRuntime = Promise.all([
-      import('pdfjs-dist/legacy/build/pdf.mjs'),
-      import('pdfjs-dist/legacy/build/pdf.worker.min.mjs?url'),
-    ]).then(([pdfjsLib, worker]) => {
-      pdfjsLib.GlobalWorkerOptions.workerSrc = worker.default
-      return pdfjsLib
+  if (!runtime) {
+    runtime = import('pdfjs-dist/legacy/build/pdf.mjs').then(async (pdfjs) => {
+      if (typeof window !== 'undefined') {
+        const worker = await import('pdfjs-dist/legacy/build/pdf.worker.min.mjs?url')
+        pdfjs.GlobalWorkerOptions.workerSrc = worker.default
+      }
+      return pdfjs
+    }).catch((error) => {
+      runtime = undefined
+      throw error
     })
   }
-  return pdfRuntime
+  return runtime
 }
 
-function rowsFromPage(textItems) {
-  const groups = new Map()
-  textItems.forEach((item) => {
-    const y = Math.round(item.transform[5] / 3) * 3
-    const existing = groups.get(y) || []
-    existing.push({ x: item.transform[4], text: item.str })
-    groups.set(y, existing)
-  })
-  return [...groups.entries()]
-    .sort(([a], [b]) => b - a)
-    .map(([, tokens]) => tokens.sort((a, b) => a.x - b.x))
-}
-
-function headerColumns(row) {
-  const rowText = row.map((token) => token.text).join('\t').toLowerCase()
-  // Some invoice generators emit a whole visual row as one text run separated
-  // by tabs. Keep that common PDF flavour as well as spatially-positioned text.
-  if (['product', 'brand', 'platform', 'base price'].every((label) => rowText.includes(label))) {
-    return { textual: true }
+function rowsFromPage(items) {
+  const runs = items.filter((item) => item.str?.trim()).map((item) => ({
+    x: item.transform[4],
+    y: item.transform[5],
+    text: item.str,
+  })).sort((a, b) => b.y - a.y)
+  const rows = []
+  for (const run of runs) {
+    let row = rows.at(-1)
+    if (!row || row.y - run.y > 2) {
+      row = { y: run.y, runs: [] }
+      rows.push(row)
+    }
+    row.runs.push(run)
   }
-  const named = {}
-  row.forEach((token) => {
-    const label = compact(token.text).toLowerCase()
-    if (label === 'product') named.product = token.x
-    if (label === 'brand') named.brand = token.x
-    if (label === 'platform') named.platform = token.x
-    if (label === 'base' || label === 'base price') named.price = token.x
-  })
-  return ['product', 'brand', 'platform', 'price'].every((key) => Number.isFinite(named[key])) ? named : null
+  return rows.map((row) => row.runs.sort((a, b) => a.x - b.x))
 }
 
-function splitTextRow(row) {
-  const raw = row.map((token) => token.text).join('')
-  const cells = raw.split(/\t{2,}| {3,}/).map(compact).filter(Boolean)
-  if (cells.length < 4) return []
-  return [cells[0], cells[1], cells[2], cells.slice(3).join(' ')]
+function readHeader(row) {
+  const labels = row.map((run) => compact(run.text).toLowerCase())
+  if (labels.join(' ') !== headers.join(' ')) return null
+  if (labels.length >= 4 && headers.slice(0, 3).every((label, index) => labels[index] === label)) {
+    return { starts: row.slice(0, 4).map((run) => run.x) }
+  }
+  if (row.length === 1 && row[0].text.trim().split(cellGap).length === headers.length) {
+    return { starts: null }
+  }
+  return null
 }
 
-function splitAtColumns(row, columns) {
-  const starts = [columns.product, columns.brand, columns.platform, columns.price]
-  const boundaries = starts.slice(1).map((start, index) => (start + starts[index]) / 2)
-  const cells = [[], [], [], []]
-  row.forEach((token) => {
-    const cell = token.x < boundaries[0] ? 0 : token.x < boundaries[1] ? 1 : token.x < boundaries[2] ? 2 : 3
-    cells[cell].push(token.text)
-  })
-  return cells.map((cell) => compact(cell.join(' ')))
+function readCells(row, layout) {
+  if (!layout.starts || (row.length === 1 && cellGap.test(row[0].text.trim()))) {
+    return row.map((run) => run.text).join(' ').trim().split(cellGap).map(compact)
+  }
+  const cells = headers.map(() => [])
+  for (const run of row) {
+    // A word inside a long cell still belongs to that cell until the next column starts.
+    const column = layout.starts.findLastIndex((start) => run.x >= start - 6)
+    cells[Math.max(0, column)].push(run.text)
+  }
+  return cells.map((parts) => compact(parts.join(' ')))
 }
 
-/** Extracts the specified selectable-text table. Image-only PDFs are rejected clearly. */
 export async function parseCartPDF(file) {
-  const pdfjsLib = await loadPdfRuntime()
-  const bytes = await file.arrayBuffer()
-  const document = await pdfjsLib.getDocument({ data: bytes }).promise
+  if (file.size > maxFileSize) throw new Error('Choose a PDF of 10 MB or less.')
+  const pdfjs = await loadPdfRuntime()
+  const task = pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()), isEvalSupported: false })
   const data = []
   const errors = []
-  let foundHeader = false
+  let layout = null
+  try {
+    const document = await task.promise
+    if (document.numPages > maxPages) throw new Error('Choose a PDF of 50 pages or fewer.')
 
-  for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
-    const page = await document.getPage(pageNumber)
-    const content = await page.getTextContent()
-    const rows = rowsFromPage(content.items.filter((item) => compact(item.str)))
-    let columns = null
+    for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
+      const page = await document.getPage(pageNumber)
+      const { items } = await page.getTextContent()
+      let inTable = false
+      for (const row of rowsFromPage(items)) {
+        const header = readHeader(row)
+        if (header) {
+          layout = header
+          inTable = true
+          continue
+        }
+        if (!layout) continue
+        const visible = compact(row.map((run) => run.text).join(' '))
+        if (/^[-–—─=]+$/.test(visible)) continue
 
-    for (const row of rows) {
-      const header = headerColumns(row)
-      if (header) {
-        columns = header
-        foundHeader = true
-        continue
+        const cells = readCells(row, layout)
+        // A later page can continue the previous table without repeating its headings.
+        if (!inTable && cells.filter(Boolean).length < 3) continue
+        const [product, brand, platform, price] = cells
+        const basePrice = Math.round(readAmount(price))
+        if (cells.length !== 4 || !product || !brand || !platform || !(basePrice > 0)) {
+          errors.push(`Page ${pageNumber}: skipped malformed row “${visible.slice(0, 160)}”.`)
+          continue
+        }
+        inTable = true
+        data.push({
+          itemId: `PDF-${String(data.length + 1).padStart(2, '0')}`,
+          product,
+          brand,
+          platform,
+          basePrice,
+        })
       }
-      if (!columns) continue
-
-      const [product, brand, platform, priceCell] = columns.textual ? splitTextRow(row) : splitAtColumns(row, columns)
-      const basePrice = priceFrom(priceCell)
-      const visibleRow = compact(row.map((token) => token.text).join(' '))
-      if (!visibleRow || /^[-–—\s]+$/.test(visibleRow)) continue
-      if (!product || !brand || !platform || !Number.isFinite(basePrice) || basePrice <= 0) {
-        if (/rs\.?|₹|\d{2,}/i.test(visibleRow)) errors.push(`Page ${pageNumber}: skipped a malformed table row: “${visibleRow}”.`)
-        continue
-      }
-      data.push({
-        itemId: `PDF-${String(data.length + 1).padStart(2, '0')}`,
-        product,
-        brand,
-        platform,
-        basePrice: Math.round(basePrice),
-      })
+      page.cleanup()
     }
+  } finally {
+    await task.destroy()
   }
 
-  if (!foundHeader) errors.unshift('No selectable Product / Brand / Platform / Base Price table was found. Use a text-based PDF in the expected four-column format.')
-  if (foundHeader && !data.length) errors.unshift('A cart table header was found, but no valid item rows could be read.')
+  if (!layout) errors.unshift('No selectable Product / Brand / Platform / Base Price table found. Use a text-based PDF or upload a CSV.')
+  else if (!data.length) errors.unshift('The table contained no valid cart items.')
   return { data, errors }
 }

@@ -77,3 +77,33 @@ test('LLM-shaped data cannot bypass checkout business rules', () => {
   assert.equal(invalid.ok, false)
   assert.match(invalid.errors.join(' '), /percentage/)
 })
+
+test('the discounted subtotal controls eligibility, and an exact threshold qualifies', () => {
+  const cart = [{ itemId: 'X', product: 'Box', brand: 'Forge', platform: 'River', basePrice: 4100 }]
+  const itemRule = { ruleId: '1', scope: 'brand', appliesTo: 'Forge', type: 'flat', value: 101, stackable: false }
+  const cartRule = { ruleId: '2', scope: 'cart', type: 'percentage', value: 10, minCartValue: 4000, stackable: false }
+  assert.equal(evaluateCart(cart, [itemRule, cartRule]).cartOffer, null)
+  const quote = evaluateCart(cart, [{ ...itemRule, value: 100 }, cartRule])
+  assert.equal(quote.subtotal, 4000)
+  assert.equal(quote.total, 3600)
+})
+
+test('offline parsing supports arbitrary names and rejects unsupported conditions', () => {
+  const parsed = parseRuleLocally('INR 1,250 off on all River Market items, not stackable')
+  assert.equal(parsed.candidate.value, 1250)
+  assert.equal(parsed.candidate.appliesTo, 'River Market')
+  assert.equal(parsed.candidate.stackable, false)
+  assert.equal(parseRuleLocally('12.5% off for Orbits brand, stackable').candidate.stackable, true)
+  for (const text of ['-10% off for Orbits brand', '10% off for Orbits brand on Mondays', '10% off for Alpha and 5% off for Beta brand']) {
+    assert.equal(parseRuleLocally(text).ok, false, text)
+  }
+})
+
+test('CSV rejects corrupt money, invalid stack flags, and duplicate IDs', () => {
+  const rules = parseRulesCSV('rule_id,scope,applies_to,type,value,stackable\nR,brand,A,percentage,15,false\nR,brand,A,flat,50,true\nX,brand,A,flat,50,maybe')
+  assert.equal(rules.data.length, 1)
+  assert.match(rules.errors.join(' '), /duplicate rule_id.*stackable/)
+  const cart = parseCartCSV('item_id,product,brand,platform,base_price\nX,Box,A,B,100\nX,Tin,A,B,200\nY,Tray,A,B,0x20')
+  assert.equal(cart.data.length, 1)
+  assert.match(cart.errors.join(' '), /duplicate item_id.*valid INR/)
+})
